@@ -90,10 +90,13 @@ class TestbenchGenerator(object):
         if self.otext=="":
             self.otext=self.get_def_template()
         # print vf_cont 
-        mod_pattern = r"module[\s]+(\S*)[\s]*\([^\)]*\)[\s\S]*"  
-        
+        # We only need the module name here. The old expression required
+        # "module NAME (" and therefore failed on parameterized modules such as
+        # "module NAME #( ... ) (".
+        mod_pattern = r"\bmodule\s+([A-Za-z_][A-Za-z0-9_$]*)\b"
         module_result = re.findall(mod_pattern, self.clean_other(self.vcont))
-        #print module_result
+        if not module_result:
+            raise ValueError("Could not find a Verilog module declaration")
         self.mod_name = module_result[0]
         
         self.parser_inoutput()
@@ -101,35 +104,49 @@ class TestbenchGenerator(object):
              
     
     def parser_inoutput(self):
-        pin_list = self.clean_other(self.vcont) 
-        
-        comp_pin_list_pre = []
-        for i in re.findall(r'(input|output|inout)[\s]+([^;,\)]+)[\s]*[;,]', pin_list):
-            comp_pin_list_pre.append((i[0], re.sub(r"^reg[\s]*", "", i[1])))
-            
-        comp_pin_list = []
-        type_name = ['reg', 'wire', 'wire', "ERROR"]
-        for i in comp_pin_list_pre:
-            x = re.split(r']', i[1])
-            type = 0;
-            if i[0] == 'input':
-                type = 0
-            elif i[0] == 'output':
-                type = 1
-            elif i[0] == 'inout':
-                type = 2
-            else:
-                type = 3
+        pin_list = self.clean_other(self.vcont)
 
-            if len(x) == 2:
-                x[1] = re.sub('[\s]*', '', x[1])
-                comp_pin_list.append((i[0], x[1], x[0] + ']', type_name[type]))
-            else:
-                comp_pin_list.append((i[0], x[0], '', type_name[type]))
-        
+        # This is intentionally still a small parser, not a Verilog grammar.
+        # It handles the common ANSI forms used by current examples:
+        #
+        #   input  wire        Clock,
+        #   input  wire [3:0]  data,
+        #   output reg  [7:0]  q,
+        #   output logic       ready
+        #
+        # It assumes one port name follows each input/output/inout keyword.
+        port_pattern = re.compile(
+            r"\b(input|output|inout)\b"
+            r"\s+"
+            r"(?:(?:wire|reg|logic)\s+)?"
+            r"(?:(?:signed|unsigned)\s+)?"
+            r"(\[[^\]]+\]\s*)?"
+            r"([A-Za-z_][A-Za-z0-9_$]*)",
+            re.IGNORECASE
+        )
+
+        comp_pin_list = []
+        type_name = {
+            'input': 'reg',
+            'output': 'wire',
+            'inout': 'wire'
+        }
+
+        for match in port_pattern.finditer(pin_list):
+            direction = match.group(1).lower()
+            width = (match.group(2) or '').strip()
+            name = match.group(3)
+            comp_pin_list.append(
+                (direction, name, width, type_name[direction])
+            )
+
+        if not comp_pin_list:
+            raise ValueError(
+                "Module found, but no simple ANSI-style ports could be parsed"
+            )
+
         self.pin_list = comp_pin_list
-        # for i in self.pin_list: print i
-        
+
     def print_dut(self):
         max_len = 0
         for cpin_name in self.pin_list:
@@ -171,13 +188,13 @@ class TestbenchGenerator(object):
         
     def find_clk_rst(self):
         for pin in self.pin_list:
-            if re.match(r'[\S]*(clk|clock)[\S]*', pin[1]):
+            if re.match(r'[\S]*(clk|clock)[\S]*', pin[1], re.IGNORECASE):
                 self.clock_name = pin[1]
                 print("Clock signal detected: '%s'." % pin[1])
                 break
 
         for pin in self.pin_list:
-            if re.match(r'rst|reset', pin[1]):
+            if re.match(r'rst|reset', pin[1], re.IGNORECASE):
                 self.reset_name = pin[1]
                 print("Reset signal detected: '%s'." % pin[1])
                 break
